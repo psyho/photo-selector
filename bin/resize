@@ -1,0 +1,37 @@
+#!/usr/bin/env ruby
+
+require 'mini_magick'
+require "fileutils"
+
+require_relative '../lib/list_images'
+
+def resize_image(input_path, output_path)
+  image = MiniMagick::Image.open(input_path)
+
+  # Calculate the scaling factor
+  longest_edge = [image.width, image.height].max
+  scale_factor = 512.0 / longest_edge
+
+  # Resize the image
+  image.resize "#{(image.width * scale_factor).to_i}x#{(image.height * scale_factor).to_i}"
+
+  # Save the resized image
+  image.write output_path
+end
+
+input_dir = ARGV[0]
+output_dir = ARGV[1]
+
+if input_dir.nil? || output_dir.nil?
+  puts "Usage: resize <input_dir> <output_dir>"
+  exit 1
+end
+
+FileUtils.mkdir_p output_dir
+
+each_jpeg(input_dir) do |input_path|
+  base_name = File.basename(input_path)
+  output_path = "#{output_dir}/#{base_name}"
+  puts "Resizing #{input_path} to #{output_path}"
+  resize_image(input_path, output_path)
+end
