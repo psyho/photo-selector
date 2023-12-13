@@ -1,0 +1,109 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+
+require_relative '../lib/compare_images'
+require_relative '../lib/list_images'
+
+directory = ARGV[0]
+resized_directory = ARGV[1]
+result_directory = ARGV[2]
+n = (ARGV[3] || 100).to_i
+
+if directory.nil? || resized_directory.nil? || result_directory.nil?
+  puts "Usage: bin/top-n <directory> <resized_directory> <result_directory> [n]"
+  exit 1
+end
+
+Image = Struct.new(:original_path, :resized_path, :basename) do
+  def self.from_json(json)
+    new(json["original_path"], json["resized_path"], json["basename"])
+  end
+
+  def as_json
+    { original_path: original_path, resized_path: resized_path, basename: basename }
+  end
+end
+
+def insert_image(images, image, max_size)
+  if images.empty?
+    images << image
+    return images
+  end
+
+  left, right = 0, images.size - 1
+  insert_idx = images.size
+  while left <= right
+    mid = left + (right - left) / 2
+    comparison_result = compare_images(images[mid].resized_path, image.resized_path)
+
+    case comparison_result
+    when CompareImages::DUPLICATE_FIRST
+      return images
+    when CompareImages::DUPLICATE_SECOND
+      images[mid] = image
+      return images
+    when CompareImages::FIRST # mid image is better than image
+      left = mid + 1
+      insert_idx = mid + 1 # insert after mid
+    when CompareImages::SECOND # image is better than mid image
+      right = mid - 1
+      insert_idx = mid # insert before mid
+    else
+      raise "Unexpected comparison result: #{comparison_result.inspect}"
+    end
+  end
+
+  images.insert(insert_idx, image)
+  images.pop if images.size > max_size
+
+  images
+end
+
+def save_state(result_directory, all, top_n)
+  File.write("#{result_directory}/results.json", { all: all.map(&:as_json), top_n: top_n.map(&:as_json) }.to_json)
+end
+
+def all_jpegs(directory, resized_directory)
+  all = []
+  each_jpeg(directory) do |original_path|
+    basename = File.basename(original_path)
+    resized_path = File.join(resized_directory, basename)
+    all << Image.new(original_path, resized_path, basename)
+  end
+  all.shuffle
+end
+
+def load_state(directory, result_directory, resized_directory)
+  return [all_jpegs(directory, resized_directory), []] unless File.exist?("#{result_directory}/results.json")
+
+  json = JSON.parse(File.read("#{result_directory}/results.json"))
+  [json["all"].map { |j| Image.from_json(j) }, json["top_n"].map { |j| Image.from_json(j) }]
+end
+
+FileUtils.mkdir_p(result_directory)
+
+begin
+  all, top_n = load_state(directory, result_directory, resized_directory)
+
+  while all.any?
+    start = Time.now
+    image = all.shift
+    puts "Inserting #{image.basename}"
+    top_n = insert_image(top_n, image, n)
+
+    save_state(result_directory, all, top_n)
+    each_jpeg(result_directory) do |rated_image|
+      FileUtils.rm(rated_image)
+    end
+
+    top_n.each_with_index do |img, idx|
+      FileUtils.ln_s(img.original_path, "#{result_directory}/#{idx.to_s.rjust(3, '0')}_#{img.basename}")
+    end
+    puts "Done in #{Time.now - start} seconds"
+  end
+rescue => e
+  puts "Error: #{e.class} #{e.message} #{e.backtrace.join("\n")}"
+  sleep rand(10)
+  retry
+end
