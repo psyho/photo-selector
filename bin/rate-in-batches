@@ -1,0 +1,104 @@
+#!/usr/bin/env ruby
+
+require_relative '../lib/list_images'
+require_relative '../lib/openai'
+
+require "fileutils"
+
+original_dir = ARGV[0]
+resized_dir = ARGV[1]
+output_dir = ARGV[2]
+batch_size = (ARGV[3] || 20).to_i
+
+if original_dir.nil? || resized_dir.nil? || output_dir.nil?
+  puts "Usage: bin/rate-in-batches original_dir resized_dir output_dir [batch_size]"
+  exit 1
+end
+
+PROMPT = <<~EOF
+  Rate the following images on a scale of 0 to 100 for suitability for inclusion in a photo album 
+  and describe contents of each in a single sentence.
+
+  Rate the images on the following criteria:
+  
+  Composition: Evaluate the arrangement of elements within the frame, including the use of space, symmetry, and the rule of thirds. Rate how effectively the composition guides the viewer's eye and balances the photo.
+  Exposure: Assess the brightness and contrast of the image. Rate how well the photo captures details in both shadows and highlights, and whether the exposure enhances or detracts from the subject.
+  Focus and Sharpness: Check the clarity and crispness of the main subject. Rate the precision of focus, especially in key areas like the eyes in a portrait, and the overall sharpness of the image.
+  Color and Tone: Look at the color balance, saturation, and tonal range. Rate how the colors contribute to the mood and realism of the photo, and whether the tones are well balanced.
+  Lighting: Evaluate the quality, direction, and softness of the light. Rate how lighting contributes to the mood, brings out textures, and highlights the subject.
+  Creativity and Originality: Consider the uniqueness of the perspective, idea, or approach. Rate the image based on its originality and creative aspects that set it apart.
+  Emotional Impact: Assess the emotional or storytelling power of the image. Rate how effectively the photo communicates a mood, story, or emotion to the viewer.
+  Technical Proficiency: Evaluate the technical aspects like ISO noise, motion blur, and use of filters. Rate how well the technical execution supports the overall quality of the image.
+  Post-Processing Quality: Assess the editing techniques used, such as cropping, color correction, and retouching. Rate the subtlety and effectiveness of post-processing in enhancing the image.
+  Subject Matter and Context: Consider the relevance and interest of the subject matter. Rate how the subject contributes to the overall appeal and context of the image.
+
+  Each criterion should be rated on a scale of 1 to 10, with 1 being bad and 10 being amazing.
+  The overall rating should be the sum of all the criteria ratings, with a maximum of 100.
+
+  For Emotional Impact and Subject Matter and Context, consider the suitability of the image for a family album.
+  Photos of people should be rated higher than photos of objects or scenery.
+
+  If there are multiple images of the same scene (same background and lighting), then pick only the best one for inclusion in the album. 
+  If they are equally good based on technical and aesthetic qualities, pick the one with more people in it.
+  If they have the same number of people, use their facial expressions and poses to decide which one is better.
+  Different angles of the same scene should be considered duplicates, just as the same scene but with different people in it is a duplicate.
+  Duplicate images which should not be included in the album should be rated 0. Include `"duplicate": true` in the output and
+  explain why the image is worse than the other images of the same scene in "rating_description" field.
+
+  Output should be a JSON array with one row per input image in the following format:
+
+  ```json
+    [
+      { 
+        "duplicate": false,
+        "rating_description": "",
+        "ratings": { "composition": 10, "exposure": 10, "focus": 10, "color": 10, "lighting": 10, "creativity": 10, "emotional": 10, "technical": 10, "post-processing": 10, "subject": 10 },
+        "rating": 100
+      }
+    ]
+  ```
+
+  Respond with ONLY JSON, and nothing else.
+EOF
+
+def resized_image(image, original_dir, resized_dir)
+  image.gsub(original_dir, resized_dir)
+end
+
+original_images = list_jpegs(original_dir)
+
+FileUtils.mkdir_p(output_dir)
+
+ratings_file = File.join(output_dir, '.ratings.json')
+all_ratings = File.exist?(ratings_file) ? JSON.parse(File.read(ratings_file)) : {}
+
+original_images = original_images.reject { |image| all_ratings.key?(image) }
+
+original_images.each_slice(batch_size) do |images|
+  begin
+    start = Time.now
+    resized = images.map { |image| resized_image(image, original_dir, resized_dir) }
+    puts "Processing #{resized.join(', ')}"
+
+    results = execute_prompt(PROMPT, *resized, tokens_per_image: 200)
+    results = parse_markdown_json(results)
+    results.each_with_index do |result, i|
+      original_image = images[i]
+      result['image'] = original_image
+      all_ratings[original_image] = result
+      base_name = File.basename(original_image)
+      rating = result['rating']
+      rated_file_name = "#{rating.to_s.rjust(3, '0')}-#{base_name}"
+      FileUtils.ln_s(original_image, File.join(output_dir, rated_file_name)) unless File.exist?(File.join(output_dir, rated_file_name))
+    end
+
+    File.write(ratings_file, all_ratings.to_json)
+
+    puts "Took #{Time.now - start} seconds"
+    break
+  rescue => e
+    puts "Error: #{e.class} #{e.message} #{e.backtrace.join("\n")}"
+    sleep 5
+    retry
+  end
+end

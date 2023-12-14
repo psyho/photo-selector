@@ -5,3 +5,11 @@ def each_jpeg(dir)
     yield image if extensions.include?(extension)
   end
 end
+
+def list_jpegs(dir)
+  images = []
+  each_jpeg(dir) do |image|
+    images << image
+  end
+  images
+end
