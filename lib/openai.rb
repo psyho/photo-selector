@@ -29,7 +29,7 @@ def execute_prompt(prompt, *images, detail: "high", tokens_per_image: 200, timeo
             {
               type: "image_url",
               image_url: {
-                url: "data:image/jpeg;base64,#{encode_image(image)}",
+                url: "data:image/jpeg;base64,#{image.respond_to?(:encoded) ? image.encoded : encode_image(image)}",
                 detail:,
               },
             }
@@ -37,6 +37,8 @@ def execute_prompt(prompt, *images, detail: "high", tokens_per_image: 200, timeo
         ]
       }
     ],
+    # temperature: 0.5,
+    # response_format: { type: "json_object" },
     max_tokens: tokens_per_image * images.size
   }
 
@@ -54,6 +56,9 @@ def execute_prompt(prompt, *images, detail: "high", tokens_per_image: 200, timeo
 end
 
 def parse_markdown_json(content)
-  clean_content = content.gsub(/^```.*$/, "")
+  index_of_first_brace = content.index("{") || content.index("[")
+  index_of_last_brace = content.rindex("}") || content.rindex("]")
+  fail "Could not find JSON in response: #{content}" unless index_of_first_brace && index_of_last_brace
+  clean_content = content[index_of_first_brace..index_of_last_brace]
   JSON.parse(clean_content)
 end

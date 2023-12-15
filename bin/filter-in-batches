@@ -1,0 +1,90 @@
+#!/usr/bin/env ruby
+
+require_relative '../lib/image'
+require_relative '../lib/openai'
+
+directory = ARGV[0]
+output_directory = ARGV[1]
+desired_count = Integer(ARGV[2]) if ARGV[2]
+
+batch_size = 20
+filter_factor = 0.5
+
+if directory.nil? || output_directory.nil?
+  puts "Usage: bin/filter-in-batches <directory> <output_directory> <desired_count>"
+  exit 1
+end
+
+def prompt(batch, filter_factor)
+  selection_size = (batch.size * filter_factor).to_i
+  <<~PROMPT
+    Compare the #{batch.size} photos below and pick the #{selection_size} ones that are best suited for a family vacation photo album.
+
+    Consider the following:
+    - is the image in focus?
+    - is the image well lit?
+    - is the image well composed? (is the image slanted, does it follow the rule of thirds, etc.)
+    - are the people in the image well posed? (are they looking at the camera, are they smiling, etc.)
+    - is the aesthetic of the image pleasing? (is the image too dark, too bright, too saturated, etc.)
+
+    Prefer portraits and landscapes over other types of photos.
+    If multiple photos share the same background and lighting conditions, only pick one of them.
+    In such a case, prefer photos that have more people in them, as long as the quality of the photo is good.
+    If multiple photos have a single child in them, keep one per child.
+    If there are more than #{selection_size} duplicates respond with fewer selected photos.
+
+    The photos are named in order:
+    #{batch.map(&:name).join("\n")}
+
+    Compare and contrast the photos and explain your reasoning why you decided that the selected photos are the best for a family album.
+    Describe each photo and why it was selected or not.
+
+    Respond with a JSON object with `reasoning` (explanation of the photos selected) and `selection` keys (list of image names selected).
+
+    ```json
+    { "reasoning: [""], "selection": ["#{batch.first.name}"] }
+    ```
+  PROMPT
+end
+
+FileUtils.mkdir_p(output_directory)
+images = Image.all_in_directory(directory)
+dropped_images_path = File.join(output_directory, '.dropped.json')
+dropped_images = File.exist?(dropped_images_path) ? JSON.parse(File.read(dropped_images_path)) : []
+total_images = images.size - dropped_images.size
+
+images.each do |image|
+  output_path = File.join(output_directory, image.name)
+  next if dropped_images.include?(image.name)
+
+  FileUtils.ln_s(image.path, output_path) unless File.exist?(output_path)
+end
+
+while total_images > desired_count
+  filtered_images = Image.all_in_directory(output_directory)
+  filtered_images.each_slice(batch_size) do |batch|
+    begin
+      start = Time.now
+      puts "Processing batch: #{batch.map(&:name).join(', ')}"
+      content = execute_prompt(prompt(batch, filter_factor), *batch)
+      result = parse_markdown_json(content)
+      puts result
+      puts "Batch processed in #{Time.now - start} seconds"
+      images_to_remove = batch.reject { |img| result['selection'].include?(img.name) }
+
+      puts "Removing images: #{images_to_remove.map(&:name).join(', ')}"
+      images_to_remove.each do |image|
+        FileUtils.rm(File.join(output_directory, image.name))
+        dropped_images << image.name
+        total_images -= 1
+        break if total_images <= desired_count
+      end
+
+      File.write(dropped_images_path, dropped_images.to_json)
+    rescue => e
+      puts "Error: #{e.class} #{e.message} #{e.backtrace.join("\n")}"
+      sleep 5
+      retry
+    end
+  end
+end
