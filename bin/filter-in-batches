@@ -81,6 +81,8 @@ while total_images > desired_count
       end
 
       File.write(dropped_images_path, dropped_images.to_json)
+
+      break if total_images <= desired_count
     rescue => e
       puts "Error: #{e.class} #{e.message} #{e.backtrace.join("\n")}"
       sleep 5
